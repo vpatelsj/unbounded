@@ -6,15 +6,15 @@ name: Isolated ACR test snapshot
 on:
   push:
     branches:
-      - build/acr-flex03-003bf10db
+      - build/acr-flex04-983aed855
 
 permissions:
   contents: read
   packages: write
 
 env:
-  SOURCE_SHA: 003bf10db54d58ec7237d8617b1d728e440ea3aa
-  SNAPSHOT_TAG: v0.8.0-acr-flex03-003bf10db
+  SOURCE_SHA: 983aed85561411cd4ae7fb907ed43716ea199efe
+  SNAPSHOT_TAG: v0.8.0-acr-flex04-983aed855
   IMAGE_REGISTRY: ghcr.io/vpatelsj/unbounded-acr-test
 
 jobs:
@@ -154,7 +154,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: acr-flex03-003bf10db-plugin
+          name: acr-flex04-983aed855-plugin
           path: build/acr-test/
           if-no-files-found: error
           retention-days: 30
