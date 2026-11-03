@@ -1,0 +1,66 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Isolated ACR audience operator
+
+on:
+  push:
+    branches:
+      - build/acr-audience-fa78f8beb
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  COMPONENT_TAG: acr-test-fa78f8beb
+  IMAGE_REGISTRY: ghcr.io/vpatelsj/unbounded-acr-test
+
+jobs:
+  operator:
+    if: github.repository == 'vpatelsj/unbounded'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify source commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Preserve existing component references while publishing the fixed operator at a unique tag.
+      - name: Build and publish operator
+        id: publish
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: images/unbounded-operator/Containerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          build-args: |
+            VERSION=${{ env.COMPONENT_TAG }}
+            GIT_COMMIT=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/vpatelsj/unbounded
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=acr-audience-${{ github.sha }}
+          tags: ${{ env.IMAGE_REGISTRY }}/unbounded-operator:acr-audience-${{ github.sha }}
+          cache-from: type=gha,scope=acr-test-unbounded-operator
+          cache-to: type=gha,scope=acr-test-unbounded-operator,mode=max
+
+      - name: Record published digest
+        env:
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          printf '%s/unbounded-operator:acr-audience-%s %s\n' \
+            "$IMAGE_REGISTRY" "$GITHUB_SHA" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
