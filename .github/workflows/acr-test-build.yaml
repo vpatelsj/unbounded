@@ -1,0 +1,160 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Isolated ACR test snapshot
+
+on:
+  push:
+    branches:
+      - build/acr-flex03-003bf10db
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  SOURCE_SHA: 003bf10db54d58ec7237d8617b1d728e440ea3aa
+  SNAPSHOT_TAG: v0.8.0-acr-flex03-003bf10db
+  IMAGE_REGISTRY: ghcr.io/vpatelsj/unbounded-acr-test
+
+jobs:
+  images:
+    if: github.repository == 'vpatelsj/unbounded'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: unbounded-operator
+            file: images/unbounded-operator/Containerfile
+            target: ""
+            net: false
+          - name: gantry
+            file: images/gantry/Containerfile
+            target: ""
+            net: false
+          - name: machina
+            file: images/machina/Containerfile
+            target: ""
+            net: false
+          - name: token-refresher
+            file: images/token-refresher/Containerfile
+            target: ""
+            net: false
+          - name: unbounded-net-controller
+            file: images/net/Containerfile
+            target: controller
+            net: true
+          - name: unbounded-net-node
+            file: images/net/Containerfile
+            target: node
+            net: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Azure/unbounded
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify source commit
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - if: matrix.net
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Prepare network image assets
+        if: matrix.net
+        run: |
+          set -euo pipefail
+          npm ci --prefer-offline --no-audit --prefix frontend
+          npm run build --prefix frontend
+          cp -R frontend/dist/. internal/net/html/dist/
+          mkdir -p resources
+          curl -fsSL --retry 3 \
+            https://github.com/containernetworking/plugins/releases/download/v1.9.1/cni-plugins-linux-amd64-v1.9.1.tgz \
+            -o resources/cni-plugins-linux-amd64-v1.9.1.tgz
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish snapshot
+        id: publish
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          build-args: |
+            VERSION=${{ env.SNAPSHOT_TAG }}
+            GIT_COMMIT=${{ env.SOURCE_SHA }}
+            CNI_PLUGINS_VERSION=v1.9.1
+          labels: |
+            org.opencontainers.image.source=https://github.com/vpatelsj/unbounded
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+            org.opencontainers.image.version=${{ env.SNAPSHOT_TAG }}
+          tags: ${{ env.IMAGE_REGISTRY }}/${{ matrix.name }}:${{ env.SNAPSHOT_TAG }}
+          cache-from: type=gha,scope=acr-test-${{ matrix.name }}
+          cache-to: type=gha,scope=acr-test-${{ matrix.name }},mode=max
+
+      - name: Record published digest
+        env:
+          IMAGE_NAME: ${{ matrix.name }}
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          printf '%s/%s:%s %s\n' "$IMAGE_REGISTRY" "$IMAGE_NAME" "$SNAPSHOT_TAG" "$IMAGE_DIGEST" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+  plugin:
+    if: github.repository == 'vpatelsj/unbounded'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Azure/unbounded
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test ACR onboarding packages
+        run: |
+          make machina-manifests net-manifests unbounded-operator-manifests gantry-manifests \
+            VERSION="$SNAPSHOT_TAG" CONTAINER_REGISTRY="$IMAGE_REGISTRY"
+          go test ./internal/registryauth ./internal/operator/components/gantry ./cmd/kubectl-unbounded/app
+
+      - name: Build matching macOS ARM64 plugin
+        run: |
+          set -euo pipefail
+          make machina-manifests net-manifests unbounded-operator-manifests \
+            VERSION="$SNAPSHOT_TAG" CONTAINER_REGISTRY="$IMAGE_REGISTRY"
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+            go build -ldflags "-X github.com/Azure/unbounded/internal/version.Version=$SNAPSHOT_TAG -X github.com/Azure/unbounded/internal/version.GitCommit=$SOURCE_SHA" \
+            -o bin/kubectl-unbounded ./cmd/kubectl-unbounded
+          mkdir -p build/acr-test
+          tar -czf build/acr-test/kubectl-unbounded-darwin-arm64.tar.gz -C bin kubectl-unbounded
+          printf 'source=%s\nversion=%s\nregistry=%s\n' "$SOURCE_SHA" "$SNAPSHOT_TAG" "$IMAGE_REGISTRY" \
+            > build/acr-test/snapshot.txt
+          cd build/acr-test
+          sha256sum kubectl-unbounded-darwin-arm64.tar.gz > SHA256SUMS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: acr-flex03-003bf10db-plugin
+          path: build/acr-test/
+          if-no-files-found: error
+          retention-days: 30
